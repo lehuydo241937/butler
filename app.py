@@ -101,84 +101,143 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ── Sidebar: session management ─────────────────────────────────────────
-with st.sidebar:
-    st.markdown("### 📂 Sessions")
+# ── Tabs ────────────────────────────────────────────────────────────────
+tab_chat, tab_db = st.tabs(["💬 Chat", "🗄️ Database"])
 
-    # New session button
-    if st.button("➕ New Session", use_container_width=True):
-        new_sid = agent.new_session(title="Streamlit chat")
-        st.session_state.current_session_id = new_sid
-        st.session_state.messages = []
-        st.rerun()
+# ── TAB 1: Chat ──────────────────────────────────────────────────────────
+with tab_chat:
+    # ── Sidebar: session management (only show when in chat tab for clarity) ──
+    with st.sidebar:
+        st.markdown("### 📂 Sessions")
+
+        # New session button
+        if st.button("➕ New Session", use_container_width=True):
+            new_sid = agent.new_session(title="Streamlit chat")
+            st.session_state.current_session_id = new_sid
+            st.session_state.messages = []
+            st.rerun()
+
+        st.divider()
+
+        # List existing sessions
+        sessions = agent.list_sessions()
+        for s in sessions:
+            sid = s["session_id"]
+            title = s.get("title", "(untitled)")
+            is_current = sid == agent.session_id
+            label = f"{'▶ ' if is_current else ''}{title}"
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                if st.button(
+                    label,
+                    key=f"sess_{sid}",
+                    use_container_width=True,
+                    disabled=is_current,
+                ):
+                    agent.switch_session(sid)
+                    st.session_state.current_session_id = sid
+                    load_history_into_state(agent)
+                    st.rerun()
+            with col2:
+                if st.button("🗑", key=f"del_{sid}", help="Delete session"):
+                    agent.history.delete_session(sid)
+                    if is_current:
+                        new_sid = agent.new_session(title="Streamlit chat")
+                        st.session_state.current_session_id = new_sid
+                        st.session_state.messages = []
+                    st.rerun()
+
+        st.divider()
+        st.caption(f"Session: `{agent.session_id[:12]}…`")
+        meta = agent.history.get_session_metadata(agent.session_id)
+        if meta.get("created_at"):
+            st.caption(f"Created: {meta['created_at'][:19]}")
+        msg_count = agent.history.count_messages(agent.session_id)
+        st.caption(f"Messages: {msg_count}")
+
+    # ── Load messages on first run / session switch ─────────────────────────
+    if "messages" not in st.session_state:
+        load_history_into_state(agent)
+
+    # Session indicator
+    st.markdown(
+        f'<div class="session-pill">Session: {agent.session_id[:12]}…</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Display chat messages ───────────────────────────────────────────────
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # ── Chat input ──────────────────────────────────────────────────────────
+    if prompt := st.chat_input("Ask Butler anything…"):
+        # Show user message immediately
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Get agent response (this saves to Redis internally)
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking…"):
+                try:
+                    reply = agent.chat(prompt)
+                except Exception as e:
+                    reply = f"⚠️ Error: {e}"
+            st.markdown(reply)
+
+        st.session_state.messages.append({"role": "assistant", "content": reply})
+
+# ── TAB 2: Database ──────────────────────────────────────────────────────
+with tab_db:
+    st.header("🗄️ SQL Database Management")
+    
+    # ── Table Explorer ──
+    st.subheader("📋 Table Explorer")
+    tables = agent.db.list_all_tables()
+    
+    if not tables:
+        st.info("No tables found in the database.")
+    else:
+        selected_table = st.selectbox("Select a table to inspect", tables)
+        
+        col_meta, col_preview = st.columns([1, 2])
+        
+        with col_meta:
+            st.write("**Schema**")
+            schema = agent.db.get_table_schema(selected_table)
+            st.table(schema)
+            
+        with col_preview:
+            st.write(f"**Data Preview (Latest 100 rows)**")
+            # For preview, we might want to order by created_at if it exists
+            preview_data = agent.db.query(f"SELECT * FROM {selected_table} LIMIT 100")
+            if preview_data:
+                st.dataframe(preview_data, use_container_width=True)
+            else:
+                st.write("Table is empty.")
 
     st.divider()
-
-    # List existing sessions
-    sessions = agent.list_sessions()
-    for s in sessions:
-        sid = s["session_id"]
-        title = s.get("title", "(untitled)")
-        is_current = sid == agent.session_id
-        label = f"{'▶ ' if is_current else ''}{title}"
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            if st.button(
-                label,
-                key=f"sess_{sid}",
-                use_container_width=True,
-                disabled=is_current,
-            ):
-                agent.switch_session(sid)
-                st.session_state.current_session_id = sid
-                load_history_into_state(agent)
-                st.rerun()
-        with col2:
-            if st.button("🗑", key=f"del_{sid}", help="Delete session"):
-                agent.history.delete_session(sid)
-                if is_current:
-                    new_sid = agent.new_session(title="Streamlit chat")
-                    st.session_state.current_session_id = new_sid
-                    st.session_state.messages = []
-                st.rerun()
-
-    st.divider()
-    st.caption(f"Session: `{agent.session_id[:12]}…`")
-    meta = agent.history.get_session_metadata(agent.session_id)
-    if meta.get("created_at"):
-        st.caption(f"Created: {meta['created_at'][:19]}")
-    msg_count = agent.history.count_messages(agent.session_id)
-    st.caption(f"Messages: {msg_count}")
-
-# ── Load messages on first run / session switch ─────────────────────────
-if "messages" not in st.session_state:
-    load_history_into_state(agent)
-
-# Session indicator
-st.markdown(
-    f'<div class="session-pill">Session: {agent.session_id[:12]}…</div>',
-    unsafe_allow_html=True,
-)
-
-# ── Display chat messages ───────────────────────────────────────────────
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-# ── Chat input ──────────────────────────────────────────────────────────
-if prompt := st.chat_input("Ask Butler anything…"):
-    # Show user message immediately
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    # Get agent response (this saves to Redis internally)
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking…"):
-            try:
-                reply = agent.chat(prompt)
-            except Exception as e:
-                reply = f"⚠️ Error: {e}"
-        st.markdown(reply)
-
-    st.session_state.messages.append({"role": "assistant", "content": reply})
+    
+    # ── SQL Console ──
+    st.subheader("💻 SQL Console")
+    query_text = st.text_area("Write your SQL query (SELECT, CREATE, INSERT, etc.)", height=150, placeholder="SELECT * FROM _master_catalog")
+    
+    if st.button("🚀 Run Query"):
+        if query_text.strip():
+            with st.spinner("Executing..."):
+                result = agent.db.execute_raw_query(query_text)
+                
+                if result["success"]:
+                    st.success("Query executed successfully!")
+                    if "data" in result:
+                        if result["data"]:
+                            st.dataframe(result["data"], use_container_width=True)
+                        else:
+                            st.write("Query returned no results.")
+                    elif "rows_affected" in result:
+                        st.write(f"Rows affected: {result['rows_affected']}")
+                else:
+                    st.error(f"❌ SQL Error: {result['error']}")
+        else:
+            st.warning("Please enter a query.")

@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from langfuse import observe
 
 from chat_history import RedisChatHistory
 from secrets_manager.redis_secrets import RedisSecretsManager
@@ -16,7 +17,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "You are Kuro, a helpful and friendly AI assistant. "
     "You have access to a SQL database via tools. "
     "Use these tools to store, retrieve, and manage structured data. "
-    "When asked to create a table or update its status, use the proposal tools. "
+    "When asked to create a table, DO NOT include 'PRIMARY KEY' in your column definitions, as the system automatically uses a composite (row_id, version) primary key for versioning. "
     "Row versioning is handled automatically when you use the update tool. "
     "Always check the database metadata first to understand available tables. "
     "Be concise but thorough."
@@ -65,8 +66,11 @@ class ButlerAgent:
                 "GEMINI_API_KEY not found in Redis secrets or environment variables."
             )
 
+        # ── Langfuse Configuration ──────────────────────────────────────
+        self.configure_langfuse(self.secrets)
+
         self.client = genai.Client(api_key=api_key)
-        self.model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp") # Using a model that supports fc well
+        self.model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
 
         # ── Tool Definitions ────────────────────────────────────────────
         self.tools = [
@@ -77,21 +81,39 @@ class ButlerAgent:
             self.update_row_data,
             self.propose_table_update,
             self.store_daily_summary,
-            self.get_daily_summary
+            self.get_daily_summary,
+            self.list_pending_actions,
+            self.confirm_action,
+            self.schedule_background_task
         ]
+
+    @staticmethod
+    def configure_langfuse(secrets: RedisSecretsManager):
+        """Globally configure Langfuse environment variables."""
+        lf_pk = secrets.get_secret("langfuse_public_key")
+        lf_sk = secrets.get_secret("langfuse_secret_key")
+        lf_host = secrets.get_secret("langfuse_host") or "https://cloud.langfuse.com"
+        
+        if lf_pk and lf_sk:
+            os.environ["LANGFUSE_PUBLIC_KEY"] = lf_pk
+            os.environ["LANGFUSE_SECRET_KEY"] = lf_sk
+            os.environ["LANGFUSE_HOST"] = lf_host
 
     # ── Database Tools ──────────────────────────────────────────────────
 
+    @observe()
     def get_database_metadata(self) -> List[Dict[str, Any]]:
         """Returns the list of tables available in the database and their schemas."""
         return self.db.get_catalog()
 
+    @observe()
     def query_database(self, sql: str) -> List[Dict[str, Any]]:
         """Executes a SELECT SQL query on the database. Use this to retrieve data."""
         if not sql.strip().lower().startswith("select"):
             return [{"error": "Only SELECT queries are allowed for safety."}]
         return self.db.query(sql)
 
+    @observe()
     def propose_new_table(self, table_name: str, description: str, columns: Dict[str, str]) -> str:
         """
         Stages a request to create a new table. 
@@ -101,11 +123,13 @@ class ButlerAgent:
         action_id = self.db.propose_table_creation(table_name, description, columns)
         return f"HITL_PROPOSAL:table_creation:{action_id}:Table '{table_name}' creation proposed. Please approve/reject."
 
+    @observe()
     def add_data_to_table(self, table_name: str, data: Dict[str, Any]) -> str:
         """Adds a new row of data to an existing table."""
         row_id = self.db.add_data(table_name, data)
         return f"Data added to '{table_name}'. Row ID: {row_id}"
 
+    @observe()
     def update_row_data(self, table_name: str, row_id: str, new_data: Dict[str, Any]) -> str:
         """Updates an existing row by creating a new version and marking the old one as invalid."""
         new_row_id = self.db.update_data(table_name, row_id, new_data)
@@ -144,7 +168,41 @@ class ButlerAgent:
                 return row["summary"]
         return f"No summary found for {day}."
 
+    def list_pending_actions(self) -> List[Dict[str, Any]]:
+        """Returns a list of all pending actions (table creations, catalog updates) that require approval."""
+        with self.db._get_conn() as conn:
+            cursor = conn.execute("SELECT * FROM _pending_actions WHERE status = 'pending'")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def confirm_action(self, action_id: str, approve: bool) -> str:
+        """Confirms (approves or rejects) a pending action. Use this when the user says 'I approve' or 'Reject it' in text."""
+        success = self.db.execute_action(action_id, approved=approve)
+        if success:
+            return f"Action {action_id} {'approved' if approve else 'rejected'} successfully."
+        else:
+            return f"Failed to confirm action {action_id}. It may not exist or is already processed."
+
+    @observe()
+    def schedule_background_task(self, name: str, task_description: str, cron_expression: str) -> str:
+        """
+        Schedules a background task to be executed periodically.
+        - name: A short name for the task.
+        - task_description: The actual instruction for the agent (e.g., 'Check the weather and notify me').
+        - cron_expression: Standard cron syntax (e.g., '0 9 * * *' for every day at 9 AM).
+        """
+        # We need the chat_id to know where to send the result.
+        # However, tools are called within a session. 
+        # In telegram_bot.py, session_id is "telegram_{chat_id}".
+        try:
+            chat_id = int(self.session_id.split("_")[1])
+        except (IndexError, ValueError):
+            return "Error: Could not determine chat_id from session_id. Background tasks are only supported via Telegram."
+
+        self.db.add_background_task(name, task_description, cron_expression, chat_id)
+        return f"Task '{name}' scheduled successfully with cron '{cron_expression}'."
+
     # ── Core chat method ────────────────────────────────────────────────
+    @observe()
     def chat(self, user_message: str) -> str:
         """
         Send a message and get the agent's reply.
@@ -153,9 +211,9 @@ class ButlerAgent:
         # 1. Persist user message
         self.history.add_message(self.session_id, "user", user_message)
 
-        # 2. Load today's conversation from Redis
-        from datetime import datetime
-        today_start = datetime.now().strftime("%Y-%m-%dT00:00:00")
+        # 2. Load today's conversation from Redis using UTC
+        from datetime import datetime, timezone
+        today_start = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00")
         messages_raw = self.history.get_history_by_time_range(self.session_id, today_start)
 
         # 3. Build Gemini contents
@@ -166,7 +224,7 @@ class ButlerAgent:
             model=self.model,
             contents=contents,
             config=types.GenerateContentConfig(
-                system_instruction=self.system_prompt,
+                system_instruction=self.system_prompt + "\n\nCRITICAL: If you call a proposal tool, you MUST include the exact HITL_PROPOSAL:... string in your final response text so the system can show buttons to the user. If a user approves an action in text, use list_pending_actions to find the ID and confirm_action to execute it.",
                 tools=self.tools,
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(
                     disable=False,

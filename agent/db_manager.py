@@ -48,6 +48,21 @@ class DBManager:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # Background tasks table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    task_description TEXT NOT NULL,
+                    cron_expression TEXT NOT NULL,
+                    last_run TIMESTAMP,
+                    next_run TIMESTAMP,
+                    target_chat_id INTEGER,
+                    status TEXT DEFAULT 'active', -- 'active', 'paused'
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
     # ── Master Catalog Operations ────────────────────────────────────────
 
@@ -129,7 +144,9 @@ class DBManager:
         # Every table has: row_id (PK), version (INT), status (valid/invalid), created_at
         col_defs = ["row_id TEXT", "version INTEGER", "status TEXT DEFAULT 'valid'", "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"]
         for col_name, col_type in columns.items():
-            col_defs.append(f"{col_name} {col_type}")
+            # Sanitize col_type: remove PRIMARY KEY if present to avoid conflict with composite PK
+            sanitized_type = col_type.replace("PRIMARY KEY", "").replace("primary key", "").strip()
+            col_defs.append(f"{col_name} {sanitized_type}")
 
         sql = f"CREATE TABLE {table_name} ({', '.join(col_defs)}, PRIMARY KEY (row_id, version))"
         
@@ -230,3 +247,46 @@ class DBManager:
         with self._get_conn() as conn:
             cursor = conn.execute(f"PRAGMA table_info({table_name})")
             return [dict(row) for row in cursor.fetchall()]
+
+    def execute_raw_query(self, sql: str, params: tuple = ()) -> Dict[str, Any]:
+        """Executes any SQL query (including DDL/DML) and returns results or error."""
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.execute(sql, params)
+                if sql.strip().lower().startswith("select") or sql.strip().lower().startswith("pragma"):
+                    return {"success": True, "data": [dict(row) for row in cursor.fetchall()]}
+                else:
+                    conn.commit()
+                    return {"success": True, "rows_affected": conn.total_changes}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def list_all_tables(self) -> List[str]:
+        """Returns a list of all user-defined table names in the database."""
+        with self._get_conn() as conn:
+            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            return [row["name"] for row in cursor.fetchall()]
+
+    # ── Background Task Operations ────────────────────────────────────────
+
+    def add_background_task(self, name: str, description: str, cron: str, chat_id: int):
+        """Adds a new background task."""
+        with self._get_conn() as conn:
+            conn.execute(
+                "INSERT INTO tasks (name, task_description, cron_expression, target_chat_id) VALUES (?, ?, ?, ?)",
+                (name, description, cron, chat_id)
+            )
+
+    def get_active_tasks(self) -> List[Dict[str, Any]]:
+        """Returns all active tasks."""
+        with self._get_conn() as conn:
+            cursor = conn.execute("SELECT * FROM tasks WHERE status = 'active'")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def update_task_run_times(self, task_id: int, last_run: datetime, next_run: datetime):
+        """Updates the run times for a task."""
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE tasks SET last_run = ?, next_run = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (last_run.isoformat(), next_run.isoformat(), task_id)
+            )

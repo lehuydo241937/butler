@@ -1,8 +1,11 @@
 import logging
 import os
 import asyncio
+from datetime import datetime, timezone
+from croniter import croniter
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters, CallbackQueryHandler
+from langfuse import observe
 
 from agent.butler import ButlerAgent
 from secrets_manager.redis_secrets import RedisSecretsManager
@@ -21,6 +24,9 @@ class TelegramButler:
         if not self.token:
             raise ValueError("Telegram API key not found in Redis secrets.")
         
+        # Configure Langfuse early so the @observe decorator has keys
+        ButlerAgent.configure_langfuse(self.secrets)
+
         self.agents = {} # chat_id -> ButlerAgent
 
     def get_agent(self, chat_id: int) -> ButlerAgent:
@@ -30,6 +36,7 @@ class TelegramButler:
             self.agents[chat_id] = ButlerAgent(session_id=session_id)
         return self.agents[chat_id]
 
+    @observe()
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not update.message or not update.message.text:
             return
@@ -76,9 +83,18 @@ class TelegramButler:
         await query.answer()
         
         data = query.data
+        logging.info(f"Callback received: {data}")
+        
         if data and data.startswith("hitl:"):
             try:
-                _, decision, action_id = data.split(":")
+                parts = data.split(":")
+                if len(parts) < 3:
+                    logging.warning(f"Invalid callback data: {data}")
+                    return
+                    
+                decision = parts[1]
+                action_id = parts[2]
+                
                 chat_id = update.effective_chat.id
                 agent = self.get_agent(chat_id)
                 
@@ -86,20 +102,94 @@ class TelegramButler:
                 success = agent.db.execute_action(action_id, approved=approved)
                 
                 if success:
-                    msg = f"Action {decision}d successfully! 👍"
+                    status_text = f"Action {decision}d"
+                    # Edit the button message immediately for feedback
+                    await query.edit_message_text(text=f"{status_text}! 👍 (Wait a moment while I continue...)")
+                    
+                    # Notify agent about the outcome and get a follow-up reply
+                    loop = asyncio.get_event_loop()
+                    follow_up_prompt = f"[SYSTEM] The user has {decision}d action {action_id} via button click. Please acknowledge and proceed."
+                    
+                    try:
+                        reply = await loop.run_in_executor(None, agent.chat, follow_up_prompt)
+                        await context.bot.send_message(chat_id=chat_id, text=reply)
+                    except Exception as e:
+                        logging.error(f"Error in agent follow-up: {e}")
+                        await context.bot.send_message(chat_id=chat_id, text="The action was successful, but I failed to generate a follow-up message.")
                 else:
-                    msg = "Failed to process action. It might have expired or been processed already."
-                
-                await query.edit_message_text(text=msg)
-                
-                # Notify agent about the outcome
-                agent.history.add_message(agent.session_id, "system", f"[HITL] Action {action_id} was {decision}d by user.")
+                    logging.warning(f"Action execution failed for {action_id}")
+                    await query.edit_message_text(text="Failed to process action. It might have expired or been processed already.")
             except Exception as e:
                 logging.error(f"Callback error: {e}")
                 await query.edit_message_text(text="An error occurred while processing your decision.")
 
+    async def check_background_tasks(self, context: ContextTypes.DEFAULT_TYPE):
+        """Checks for due tasks and executes them."""
+        # We need a db instance. We can get it from a dummy agent or instantiate DBManager directly.
+        from agent.db_manager import DBManager
+        db = DBManager()
+        
+        active_tasks = db.get_active_tasks()
+        now = datetime.now(timezone.utc)
+        
+        for task in active_tasks:
+            task_id = task["id"]
+            cron_expr = task["cron_expression"]
+            last_run_str = task["last_run"]
+            next_run_str = task["next_run"]
+            chat_id = task["target_chat_id"]
+            description = task["task_description"]
+            
+            # Calculate next run if not set
+            if not next_run_str:
+                iter = croniter(cron_expr, now)
+                next_run = iter.get_next(datetime)
+                db.update_task_run_times(task_id, datetime.fromtimestamp(0, timezone.utc), next_run)
+                continue
+            
+            next_run = datetime.fromisoformat(next_run_str)
+            if now >= next_run:
+                logging.info(f"Executing background task {task_id}: {task['name']}")
+                
+                # Execute task
+                agent = self.get_agent(chat_id)
+                loop = asyncio.get_event_loop()
+                
+                # Generate a background-specific prompt
+                bg_prompt = f"[BACKGROUND TASK] {description}\n\nPlease execute this task. If there is a result or notification for the user, provide it."
+                
+                try:
+                    reply = await loop.run_in_executor(None, agent.chat, bg_prompt)
+                    await context.bot.send_message(chat_id=chat_id, text=f"🔔 *Automated Task: {task['name']}*\n\n{reply}", parse_mode='Markdown')
+                except Exception as e:
+                    logging.error(f"Error executing task {task_id}: {e}")
+                    await context.bot.send_message(chat_id=chat_id, text=f"❌ Error executing automated task '{task['name']}': {e}")
+                
+                # Update run times
+                iter = croniter(cron_expr, now)
+                new_next_run = iter.get_next(datetime)
+                db.update_task_run_times(task_id, now, new_next_run)
+
     def run(self):
-        application = ApplicationBuilder().token(self.token).build()
+        # Increased timeouts for slow networks
+        builder = ApplicationBuilder().token(self.token)
+        builder.read_timeout(60)
+        builder.connect_timeout(60)
+        
+        # Optional proxy support
+        proxy_url = os.getenv("TELEGRAM_PROXY")
+        if proxy_url:
+            logging.info(f"Using proxy: {proxy_url}")
+            builder.proxy_url(proxy_url)
+            builder.get_updates_proxy_url(proxy_url)
+
+        application = builder.build()
+        
+        # Add background task checker job
+        if application.job_queue:
+            application.job_queue.run_repeating(self.check_background_tasks, interval=60, first=10)
+        else:
+            logging.error("JobQueue not available. Background tasks will not run.")
         
         message_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message)
         callback_handler = CallbackQueryHandler(self.handle_callback)
