@@ -127,9 +127,11 @@ class TelegramButler:
         """Checks for due tasks and executes them."""
         # We need a db instance. We can get it from a dummy agent or instantiate DBManager directly.
         from agent.db_manager import DBManager
+        from agent.protocol_runner import ProtocolRunner
         db = DBManager()
         
         active_tasks = db.get_active_tasks()
+        active_protocols = db.get_active_protocols()
         now = datetime.now(timezone.utc)
         
         for task in active_tasks:
@@ -169,6 +171,53 @@ class TelegramButler:
                 iter = croniter(cron_expr, now)
                 new_next_run = iter.get_next(datetime)
                 db.update_task_run_times(task_id, now, new_next_run)
+
+        # ── Check Protocols ──────────────────────────────────────────────────
+        for proto in active_protocols:
+            proto_id = proto["id"]
+            cron_expr = proto["cron_expression"]
+            last_run_str = proto["last_run"]
+            next_run_str = proto["next_run"]
+            chat_id = proto["target_chat_id"]
+            
+            # Calculate next run if not set
+            if not next_run_str:
+                iter = croniter(cron_expr, now)
+                next_run = iter.get_next(datetime)
+                db.update_protocol_run_times(proto_id, datetime.fromtimestamp(0, timezone.utc), next_run)
+                continue
+            
+            next_run = datetime.fromisoformat(next_run_str)
+            if now >= next_run:
+                logging.info(f"Executing protocol {proto_id}: {proto['name']}")
+                
+                agent = self.get_agent(chat_id)
+                loop = asyncio.get_event_loop()
+                
+                try:
+                    # Instantiate runner
+                    runner = ProtocolRunner(
+                        gemini_client=agent.client,
+                        gemini_model=agent.model,
+                        gmail_tools=agent.gmail,
+                        secrets=agent.secrets,
+                        telegram_bot=context.bot,
+                    )
+                    
+                    # Run it in thread
+                    await loop.run_in_executor(None, runner.run, proto, chat_id)
+                    logging.info(f"Protocol '{proto['name']}' finished successfully.")
+                except Exception as e:
+                    logging.error(f"Error executing protocol {proto_id}: {e}")
+                    await context.bot.send_message(
+                        chat_id=chat_id, 
+                        text=f"❌ Error executing protocol '{proto['name']}': {e}"
+                    )
+                
+                # Update run times
+                iter = croniter(cron_expr, now)
+                new_next_run = iter.get_next(datetime)
+                db.update_protocol_run_times(proto_id, now, new_next_run)
 
     def run(self):
         # Increased timeouts for slow networks

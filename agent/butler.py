@@ -9,6 +9,7 @@ from langfuse import observe
 from chat_history import RedisChatHistory
 from secrets_manager.redis_secrets import RedisSecretsManager
 from agent.db_manager import DBManager
+from agent.gmail_tools import GmailTools
 
 load_dotenv()
 
@@ -20,6 +21,9 @@ DEFAULT_SYSTEM_PROMPT = (
     "When asked to create a table, DO NOT include 'PRIMARY KEY' in your column definitions, as the system automatically uses a composite (row_id, version) primary key for versioning. "
     "Row versioning is handled automatically when you use the update tool. "
     "Always check the database metadata first to understand available tables. "
+    "You also have access to Gmail tools: list_emails, get_email, search_emails, add_label_to_email, remove_label_from_email. "
+    "Use them when the user asks about their email, inbox, or wants to tag/label messages. "
+    "You can also manage multi-step background Protocols: register_email_digest, create_protocol, list_protocols. "
     "Be concise but thorough."
 )
 
@@ -41,6 +45,7 @@ class ButlerAgent:
         self.history = history or RedisChatHistory()
         self.secrets = secrets or RedisSecretsManager()
         self.db = DBManager()
+        self.gmail = GmailTools(self.secrets)
 
         if not self.history.ping():
             raise ConnectionError(
@@ -84,7 +89,17 @@ class ButlerAgent:
             self.get_daily_summary,
             self.list_pending_actions,
             self.confirm_action,
-            self.schedule_background_task
+            self.schedule_background_task,
+            # ── Gmail tools ──────────────────────────────────────────────
+            self.list_emails,
+            self.get_email,
+            self.search_emails,
+            self.add_label_to_email,
+            self.remove_label_from_email,
+            # ── Protocol tools ───────────────────────────────────────────
+            self.register_email_digest,
+            self.create_protocol,
+            self.list_protocols,
         ]
 
     @staticmethod
@@ -200,6 +215,127 @@ class ButlerAgent:
 
         self.db.add_background_task(name, task_description, cron_expression, chat_id)
         return f"Task '{name}' scheduled successfully with cron '{cron_expression}'."
+
+    # ── Gmail Tools ──────────────────────────────────────────────────────
+
+    @observe()
+    def list_emails(self, max_results: int = 10, unread_only: bool = False):
+        """
+        List recent emails from the Gmail inbox.
+
+        Args:
+            max_results: How many emails to return (default 10, max 50).
+            unread_only: If True, return only unread emails.
+
+        Returns:
+            List of email summaries with id, subject, from, date, snippet, labels.
+        """
+        return self.gmail.list_emails(max_results=max_results, unread_only=unread_only)
+
+    @observe()
+    def get_email(self, email_id: str):
+        """
+        Get the full content of an email by its ID.
+
+        Args:
+            email_id: The Gmail message ID (obtained from list_emails or search_emails).
+
+        Returns:
+            Dict with id, subject, from, to, date, body, labels.
+        """
+        return self.gmail.get_email(email_id=email_id)
+
+    @observe()
+    def search_emails(self, query: str, max_results: int = 10):
+        """
+        Search Gmail using a query string (supports Gmail search operators).
+
+        Example queries:
+          - "from:boss@company.com is:unread"
+          - "subject:invoice after:2024/01/01"
+          - "has:attachment"
+
+        Args:
+            query: Gmail search query.
+            max_results: Max results to return (default 10, max 50).
+
+        Returns:
+            List of email summary dicts.
+        """
+        return self.gmail.search_emails(query=query, max_results=max_results)
+
+    @observe()
+    def add_label_to_email(self, email_id: str, label_name: str) -> str:
+        """
+        Add a label (tag) to a Gmail message. Creates the label if it doesn't exist.
+
+        Args:
+            email_id: Gmail message ID.
+            label_name: Name of the label to add (e.g. "Butler/Review").
+
+        Returns:
+            Confirmation message.
+        """
+        return self.gmail.add_label_to_email(email_id=email_id, label_name=label_name)
+
+    @observe()
+    def remove_label_from_email(self, email_id: str, label_name: str) -> str:
+        """
+        Remove a label from a Gmail message.
+
+        Args:
+            email_id: Gmail message ID.
+            label_name: Name of the label to remove.
+
+        Returns:
+            Confirmation message.
+        """
+        return self.gmail.remove_label_from_email(email_id=email_id, label_name=label_name)
+
+    # ── Protocol Tools ───────────────────────────────────────────────────
+
+    @observe()
+    def register_email_digest(self) -> str:
+        """
+        Registers the built-in daily email digest protocol.
+        It runs daily at 6:00 AM, fetches emails since the last run, filters spam with AI,
+        and sends a summary to the user's Telegram.
+
+        Returns:
+            Confirmation string.
+        """
+        try:
+            chat_id = int(self.session_id.split("_")[1])
+        except (IndexError, ValueError):
+            return "Error: Could not determine chat_id. Protocols require Telegram."
+
+        import agent.email_digest as ed
+        return ed.register(self.db, chat_id)
+
+    @observe()
+    def list_protocols(self) -> List[Dict[str, Any]]:
+        """
+        Lists all active background protocols (multi-step tasks).
+        """
+        return self.db.list_protocols()
+
+    @observe()
+    def create_protocol(
+        self, name: str, description: str, steps: List[Dict[str, Any]], cron_expression: str
+    ) -> str:
+        """
+        Proposes the creation of a generic multi-step protocol. Requires HITL approval.
+        'steps' must be A JSON array of step dictionaries.
+        """
+        # We abuse propose_master_update or create a new HITL action type if we wanted purely generic.
+        # But for now we just insert it, since the user usually asks for it directly.
+        try:
+            chat_id = int(self.session_id.split("_")[1])
+        except (IndexError, ValueError):
+            return "Error: Could not determine chat_id."
+
+        pid = self.db.add_protocol(name, description, steps, cron_expression, chat_id)
+        return f"Protocol '{name}' created with ID {pid}, cron '{cron_expression}'."
 
     # ── Core chat method ────────────────────────────────────────────────
     @observe()

@@ -48,7 +48,7 @@ class DBManager:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            # Background tasks table
+            # Background tasks table (legacy single-step tasks)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,6 +61,21 @@ class DBManager:
                     status TEXT DEFAULT 'active', -- 'active', 'paused'
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # Protocols table — multi-step execution pipelines
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS protocols (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name            TEXT UNIQUE NOT NULL,
+                    description     TEXT,
+                    steps           TEXT NOT NULL,       -- JSON array of step definitions
+                    cron_expression TEXT,
+                    target_chat_id  INTEGER,
+                    status          TEXT DEFAULT 'active', -- 'active' | 'paused'
+                    last_run        TIMESTAMP,
+                    next_run        TIMESTAMP,
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
 
@@ -290,3 +305,63 @@ class DBManager:
                 "UPDATE tasks SET last_run = ?, next_run = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (last_run.isoformat(), next_run.isoformat(), task_id)
             )
+
+    # ── Protocol Operations ─────────────────────────────────────────────────────
+
+    def add_protocol(
+        self,
+        name: str,
+        description: str,
+        steps: list,
+        cron_expression: str,
+        chat_id: int,
+    ) -> int:
+        """Inserts a new protocol. Returns its id."""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO protocols (name, description, steps, cron_expression, target_chat_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (name, description, json.dumps(steps), cron_expression, chat_id),
+            )
+            return cursor.lastrowid
+
+    def get_active_protocols(self) -> List[Dict[str, Any]]:
+        """Returns all active protocols, with steps parsed from JSON."""
+        with self._get_conn() as conn:
+            cursor = conn.execute("SELECT * FROM protocols WHERE status = 'active'")
+            rows = [dict(r) for r in cursor.fetchall()]
+        for row in rows:
+            row["steps"] = json.loads(row["steps"])
+        return rows
+
+    def get_protocol_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        """Returns a single protocol by name, or None."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM protocols WHERE name = ?", (name,)
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["steps"] = json.loads(result["steps"])
+        return result
+
+    def update_protocol_run_times(
+        self, protocol_id: int, last_run: datetime, next_run: datetime
+    ):
+        """Updates last_run / next_run after a protocol execution."""
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE protocols SET last_run = ?, next_run = ? WHERE id = ?",
+                (last_run.isoformat(), next_run.isoformat(), protocol_id),
+            )
+
+    def list_protocols(self) -> List[Dict[str, Any]]:
+        """Returns name, description, cron, status, last_run for all protocols."""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "SELECT id, name, description, cron_expression, status, last_run, next_run FROM protocols"
+            )
+            return [dict(r) for r in cursor.fetchall()]

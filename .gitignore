@@ -5,3 +5,8 @@
 /__pycache__
 */__pycache__
 */__pycache__/*
+
+# Gmail OAuth — should live in Redis, but guard files just in case
+token.json
+credentials.json
+client_secret_*.json
