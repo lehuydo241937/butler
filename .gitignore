@@ -2,6 +2,7 @@
 /.env.example
 /chat hist
 
+__pycache__
 /__pycache__
 */__pycache__
 */__pycache__/*
