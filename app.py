@@ -5,6 +5,12 @@ Run:  streamlit run app.py
 """
 
 import streamlit as st
+from datetime import datetime, timezone
+from agent.network_utils import force_ipv4
+
+# Force IPv4 to prevent timeouts on environments with broken IPv6
+force_ipv4()
+
 from agent import ButlerAgent
 from chat_history import RedisChatHistory
 
@@ -92,92 +98,57 @@ def load_history_into_state(agent: ButlerAgent) -> None:
 # ── Main UI ─────────────────────────────────────────────────────────────
 agent = init_agent()
 
-# Header
-st.markdown(
-    '<div class="butler-header">'
-    "<h1>🤵 Butler AI</h1>"
-    "<p>Your AI assistant with persistent memory</p>"
-    "</div>",
-    unsafe_allow_html=True,
+# Sidebar Navigation
+st.sidebar.title("🤵 Butler Dashboard")
+page = st.sidebar.radio(
+    "Navigation",
+    ["💬 Agent Testing", "🗃️ SQL Schema View", "🕒 Redis History", "🧬 Vector Collections"]
 )
 
-# ── Tabs ────────────────────────────────────────────────────────────────
-tab_chat, tab_db = st.tabs(["💬 Chat", "🗄️ Database"])
-
-# ── TAB 1: Chat ──────────────────────────────────────────────────────────
-with tab_chat:
-    # ── Sidebar: session management (only show when in chat tab for clarity) ──
-    with st.sidebar:
-        st.markdown("### 📂 Sessions")
-
-        # New session button
-        if st.button("➕ New Session", use_container_width=True):
-            new_sid = agent.new_session(title="Streamlit chat")
-            st.session_state.current_session_id = new_sid
-            st.session_state.messages = []
-            st.rerun()
-
-        st.divider()
-
-        # List existing sessions
-        sessions = agent.list_sessions()
-        for s in sessions:
-            sid = s["session_id"]
-            title = s.get("title", "(untitled)")
-            is_current = sid == agent.session_id
-            label = f"{'▶ ' if is_current else ''}{title}"
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                if st.button(
-                    label,
-                    key=f"sess_{sid}",
-                    use_container_width=True,
-                    disabled=is_current,
-                ):
-                    agent.switch_session(sid)
-                    st.session_state.current_session_id = sid
-                    load_history_into_state(agent)
-                    st.rerun()
-            with col2:
-                if st.button("🗑", key=f"del_{sid}", help="Delete session"):
-                    agent.history.delete_session(sid)
-                    if is_current:
-                        new_sid = agent.new_session(title="Streamlit chat")
-                        st.session_state.current_session_id = new_sid
-                        st.session_state.messages = []
-                    st.rerun()
-
-        st.divider()
-        st.caption(f"Session: `{agent.session_id[:12]}…`")
-        meta = agent.history.get_session_metadata(agent.session_id)
-        if meta.get("created_at"):
-            st.caption(f"Created: {meta['created_at'][:19]}")
-        msg_count = agent.history.count_messages(agent.session_id)
-        st.caption(f"Messages: {msg_count}")
-
-    # ── Load messages on first run / session switch ─────────────────────────
-    if "messages" not in st.session_state:
-        load_history_into_state(agent)
-
-    # Session indicator
+# ── PAGE: Agent Testing ──────────────────────────────────────────────────
+if page == "💬 Agent Testing":
     st.markdown(
-        f'<div class="session-pill">Session: {agent.session_id[:12]}…</div>',
+        '<div class="butler-header">'
+        "<h1>💬 Agent Testing</h1>"
+        "<p>Test the Butler agent with a consistent chat session</p>"
+        "</div>",
         unsafe_allow_html=True,
     )
+    
+    # Use a specific session for testing
+    TEST_SESSION_ID = "streamlit_test_session"
+    
+    # Check if we need to switch to test session
+    if agent.session_id != TEST_SESSION_ID:
+        try:
+            agent.switch_session(TEST_SESSION_ID)
+        except ValueError:
+            agent.new_session(title="Test Session") # create_session is usually random, but switch_session checks metadata
+            # Force set if creation doesn't allow custom SID easily
+            agent.session_id = TEST_SESSION_ID
+            agent.history.r.sadd(agent.history._SESSION_INDEX, TEST_SESSION_ID)
+            agent.history.r.hset(agent.history._META_KEY.format(sid=TEST_SESSION_ID), mapping={
+                "title": "Streamlit Test Session",
+                "created_at": datetime.now(timezone.utc).isoformat()
+            })
 
-    # ── Display chat messages ───────────────────────────────────────────────
+    if "messages" not in st.session_state or st.session_state.get("last_sid") != TEST_SESSION_ID:
+        load_history_into_state(agent)
+        st.session_state.last_sid = TEST_SESSION_ID
+
+    st.markdown(f'<div class="session-pill">Test Session ID: `{TEST_SESSION_ID}`</div>', unsafe_allow_html=True)
+
+    # Display chat messages
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # ── Chat input ──────────────────────────────────────────────────────────
+    # Chat input
     if prompt := st.chat_input("Ask Butler anything…"):
-        # Show user message immediately
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Get agent response (this saves to Redis internally)
         with st.chat_message("assistant"):
             with st.spinner("Thinking…"):
                 try:
@@ -185,14 +156,18 @@ with tab_chat:
                 except Exception as e:
                     reply = f"⚠️ Error: {e}"
             st.markdown(reply)
-
         st.session_state.messages.append({"role": "assistant", "content": reply})
 
-# ── TAB 2: Database ──────────────────────────────────────────────────────
-with tab_db:
-    st.header("🗄️ SQL Database Management")
+# ── PAGE: SQL Schema View ──────────────────────────────────────────────
+elif page == "🗃️ SQL Schema View":
+    st.markdown(
+        '<div class="butler-header">'
+        "<h1>🗃️ SQL Schema View</h1>"
+        "<p>Inspect tables, schemas, and run queries</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
     
-    # ── Table Explorer ──
     st.subheader("📋 Table Explorer")
     tables = agent.db.list_all_tables()
     
@@ -210,7 +185,6 @@ with tab_db:
             
         with col_preview:
             st.write(f"**Data Preview (Latest 100 rows)**")
-            # For preview, we might want to order by created_at if it exists
             preview_data = agent.db.query(f"SELECT * FROM {selected_table} LIMIT 100")
             if preview_data:
                 st.dataframe(preview_data, use_container_width=True)
@@ -219,15 +193,13 @@ with tab_db:
 
     st.divider()
     
-    # ── SQL Console ──
     st.subheader("💻 SQL Console")
-    query_text = st.text_area("Write your SQL query (SELECT, CREATE, INSERT, etc.)", height=150, placeholder="SELECT * FROM _master_catalog")
+    query_text = st.text_area("Write your SQL query", height=150, placeholder="SELECT * FROM _master_catalog")
     
     if st.button("🚀 Run Query"):
         if query_text.strip():
             with st.spinner("Executing..."):
                 result = agent.db.execute_raw_query(query_text)
-                
                 if result["success"]:
                     st.success("Query executed successfully!")
                     if "data" in result:
@@ -241,3 +213,69 @@ with tab_db:
                     st.error(f"❌ SQL Error: {result['error']}")
         else:
             st.warning("Please enter a query.")
+
+# ── PAGE: Redis History ───────────────────────────────────────────────
+elif page == "🕒 Redis History":
+    st.markdown(
+        '<div class="butler-header">'
+        "<h1>🕒 Redis Chat History</h1>"
+        "<p>View and manage conversational memory</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    
+    sessions = agent.list_sessions()
+    if not sessions:
+        st.info("No chat sessions found in Redis.")
+    else:
+        # Create a display list for the selectbox
+        session_options = {s["session_id"]: f"{s.get('title', '(untitled)')} - {s['session_id'][:8]}" for s in sessions}
+        selected_sid = st.selectbox("Select a session to view", options=list(session_options.keys()), format_func=lambda x: session_options[x])
+        
+        if selected_sid:
+            st.divider()
+            history = agent.history.get_history(selected_sid)
+            
+            if not history:
+                st.write("This session has no messages.")
+            else:
+                for msg in history:
+                    role = msg.get("role", "unknown")
+                    # Map role to cleaner label
+                    role_label = "👤 Human" if role == "user" else "🤖 AI" if role == "assistant" else "⚙️ System"
+                    
+                    with st.container():
+                        st.markdown(f"**{role_label}** <small>{msg.get('timestamp', '')}</small>", unsafe_allow_html=True)
+                        st.markdown(msg.get("content", ""))
+                        st.divider()
+
+# ── PAGE: Vector Collections ──────────────────────────────────────────
+elif page == "🧬 Vector Collections":
+    st.markdown(
+        '<div class="butler-header">'
+        "<h1>🧬 Vector Collections</h1>"
+        "<p>Inspect Qdrant vector database storage</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    
+    try:
+        collections = agent.vector_db.list_collections()
+        if not collections:
+            st.info("No collections found in Qdrant.")
+        else:
+            selected_col = st.selectbox("Select a collection", collections)
+            
+            # Get collection details
+            info = agent.vector_db.client.get_collection(selected_col)
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Points Count", info.points_count)
+            col2.metric("Status", info.status.name)
+            col3.metric("Vector Size", info.config.params.vectors.size)
+            
+            st.write("### Configuration")
+            st.json(info.model_dump())
+            
+    except Exception as e:
+        st.error(f"Error connecting to Qdrant: {e}")

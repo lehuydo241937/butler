@@ -1,0 +1,4 @@
+<class 'qdrant_client.http.models.models.QueryResponse'>
+Has points attribute.
+ID: 44806c1e-cbd6-529d-a1d2-833bc83cc027, Score: 0.7331202, Payload keys: ['email_id', 'text', 'subject', 'from', 'date']
+ID: 66b67205-c516-57b8-b728-a68845047cae, Score: 0.7055897, Payload keys: ['email_id', 'text', 'subject', 'from', 'date']

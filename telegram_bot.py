@@ -1,6 +1,11 @@
 import logging
 import os
 import asyncio
+from agent.network_utils import force_ipv4
+
+# Force IPv4 to prevent timeouts on environments with broken IPv6
+force_ipv4()
+
 from datetime import datetime, timezone
 from croniter import croniter
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup

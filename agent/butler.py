@@ -10,6 +10,7 @@ from chat_history import RedisChatHistory
 from secrets_manager.redis_secrets import RedisSecretsManager
 from agent.db_manager import DBManager
 from agent.gmail_tools import GmailTools
+from agent.vector_db import VectorDB
 
 load_dotenv()
 
@@ -46,6 +47,10 @@ class ButlerAgent:
         self.secrets = secrets or RedisSecretsManager()
         self.db = DBManager()
         self.gmail = GmailTools(self.secrets)
+        self.vector_db = VectorDB(
+            host=os.getenv("QDRANT_HOST", "localhost"),
+            port=int(os.getenv("QDRANT_PORT", 6333))
+        )
 
         if not self.history.ping():
             raise ConnectionError(
@@ -96,6 +101,8 @@ class ButlerAgent:
             self.search_emails,
             self.add_label_to_email,
             self.remove_label_from_email,
+            self.semantic_search_emails,
+            self.index_recent_emails,
             # ── Protocol tools ───────────────────────────────────────────
             self.register_email_digest,
             self.create_protocol,
@@ -291,6 +298,65 @@ class ButlerAgent:
             Confirmation message.
         """
         return self.gmail.remove_label_from_email(email_id=email_id, label_name=label_name)
+
+    @observe()
+    def semantic_search_emails(self, query: str, limit: int = 5) -> str:
+        """
+        Perform a semantic (RAG) search across indexed emails.
+        Use this when the user asks a question about the content of their emails,
+        especially when keywords might not match exactly.
+
+        Args:
+            query: The search query or question.
+            limit: Number of results to return (default 5).
+        """
+        results = self.vector_db.search_emails(query, self.client, limit=limit)
+        if not results:
+            return "No relevant emails found in the vector database."
+        
+        output = "Relevant emails found:\n\n"
+        for r in results:
+            output += f"- *{r['subject']}* (From: {r['from']}, Date: {r['date']})\n"
+            output += f"  Snippet: {r['text']}...\n"
+            output += f"  ID: {r['email_id']}\n\n"
+        return output
+
+    @observe()
+    def index_recent_emails(self, count: int = 20) -> str:
+        """
+        Indexes the most recent emails into the vector database for future RAG searches.
+        You should run this if the user asks to 'index my emails' or 'update search'.
+
+        Args:
+            count: Number of recent emails to index (default 20).
+        """
+        emails = self.gmail.list_emails(max_results=count)
+        indexed_count = 0
+        for e in emails:
+            if "error" in e: continue
+            
+            # Fetch full content to index better
+            full = self.gmail.get_email(e["id"])
+            if "error" in full:
+                body = e.get("snippet", "")
+            else:
+                body = full.get("body", "")
+
+            # Prepare metadata
+            metadata = {
+                "subject": e.get("subject"),
+                "from": e.get("from"),
+                "date": e.get("date")
+            }
+            
+            # Prepare text for embedding: combine subject and body
+            index_text = f"Subject: {e.get('subject')}\n\n{body}"
+            
+            success = self.vector_db.upsert_email(e["id"], index_text, metadata, self.client)
+            if success:
+                indexed_count += 1
+        
+        return f"Successfully indexed {indexed_count} emails into the vector database."
 
     # ── Protocol Tools ───────────────────────────────────────────────────
 
