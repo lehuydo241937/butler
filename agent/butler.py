@@ -11,6 +11,7 @@ from secrets_manager.redis_secrets import RedisSecretsManager
 from agent.db_manager import DBManager
 from agent.gmail_tools import GmailTools
 from agent.vector_db import VectorDB
+from agent.data_ingester import DataIngester
 
 load_dotenv()
 
@@ -23,8 +24,8 @@ DEFAULT_SYSTEM_PROMPT = (
     "Row versioning is handled automatically when you use the update tool. "
     "Always check the database metadata first to understand available tables. "
     "You also have access to Gmail tools: list_emails, get_email, search_emails, add_label_to_email, remove_label_from_email. "
-    "Use them when the user asks about their email, inbox, or wants to tag/label messages. "
     "You can also manage multi-step background Protocols: register_email_digest, create_protocol, list_protocols. "
+    "To handle external chat data (Zalo, Facebook), use sync_data_folder to check for new exports and semantic_search_messages to retrieve them. "
     "Be concise but thorough."
 )
 
@@ -81,6 +82,7 @@ class ButlerAgent:
 
         self.client = genai.Client(api_key=api_key)
         self.model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+        self.ingester = DataIngester(self.db, self.vector_db, self.client)
 
         # ── Tool Definitions ────────────────────────────────────────────
         self.tools = [
@@ -103,6 +105,9 @@ class ButlerAgent:
             self.remove_label_from_email,
             self.semantic_search_emails,
             self.index_recent_emails,
+            # ── Message Ingestion tools ──────────────────────────────────
+            self.sync_data_folder,
+            self.semantic_search_messages,
             # ── Protocol tools ───────────────────────────────────────────
             self.register_email_digest,
             self.create_protocol,
@@ -358,6 +363,72 @@ class ButlerAgent:
         
         return f"Successfully indexed {indexed_count} emails into the vector database."
 
+    @observe()
+    def sync_data_folder(self, folder_path: Optional[str] = None) -> str:
+        """
+        Scans a local folder for new Zalo/Facebook ZIP exports and indexes them.
+        Use this if the user says 'sync my data' or 'update my messages'.
+
+        Args:
+            folder_path: Override for the default DATA_INGEST_DIR.
+        """
+        path = folder_path or os.getenv("DATA_INGEST_DIR", "./data_ingest")
+        result = self.ingester.scan_folder(path)
+        
+        if result["status"] == "info":
+            return result["message"]
+            
+        summary = ""
+        for r in result.get("results", []):
+            summary += f"- {r.get('message', 'Processing done.')}\n"
+            
+        return f"Data sync complete in {path}:\n{summary or 'No new files found.'}"
+
+    @observe()
+    def semantic_search_messages(self, query: str, source: str = "all", limit: int = 5) -> str:
+        """
+        Searches through indexed Zalo and Facebook messages using semantic search.
+        Use this when the user asks about chats, Zalo history, or Facebook messages.
+
+        Args:
+            query: The search question.
+            source: 'zalo', 'facebook', or 'all' (default).
+            limit: Number of results (default 5).
+        """
+        collections = []
+        if source == "zalo":
+            collections = ["zalo"]
+        elif source == "facebook":
+            collections = ["facebook"]
+        else:
+            collections = ["zalo", "facebook"]
+
+        all_results = []
+        for col in collections:
+            res = self.vector_db.search_documents(col, query, self.client, limit=limit)
+            all_results.extend(res)
+
+        # Sort by score and limit
+        all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+        results = all_results[:limit]
+
+        if not results:
+            return f"No relevant {source} messages found."
+
+        output = f"Top {len(results)} relevant messages found:\n\n"
+        for r in results:
+            src = r.get("source", "unknown").upper()
+            sender = r.get("sender", "Unknown")
+            date_str = ""
+            if r.get("timestamp"):
+                from datetime import datetime
+                date_str = f" on {datetime.fromtimestamp(r['timestamp']).strftime('%Y-%m-%d %H:%M')}"
+            
+            output += f"--- [{src}] From {sender}{date_str} ---\n"
+            output += f"{r.get('text', '')}\n\n"
+            
+        return output
+
     # ── Protocol Tools ───────────────────────────────────────────────────
 
     @observe()
@@ -405,12 +476,12 @@ class ButlerAgent:
 
     # ── Core chat method ────────────────────────────────────────────────
     @observe()
-    def chat(self, user_message: str) -> str:
+    def chat(self, user_message: str, image_bytes: Optional[bytes] = None) -> str:
         """
         Send a message and get the agent's reply.
         Handles tool calling automatically.
         """
-        # 1. Persist user message
+        # 1. Persist user message (Redis history only stores text for now)
         self.history.add_message(self.session_id, "user", user_message)
 
         # 2. Load today's conversation from Redis using UTC
@@ -418,8 +489,8 @@ class ButlerAgent:
         today_start = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00")
         messages_raw = self.history.get_history_by_time_range(self.session_id, today_start)
 
-        # 3. Build Gemini contents
-        contents = self._build_contents(messages_raw)
+        # 3. Build Gemini contents (including image if provided for the last turn)
+        contents = self._build_contents(messages_raw, current_image_bytes=image_bytes)
 
         # 4. Call Gemini with Tools
         response = self.client.models.generate_content(
@@ -464,11 +535,12 @@ class ButlerAgent:
 
     # ── Internal helpers ────────────────────────────────────────────────
     @staticmethod
-    def _build_contents(messages: List[Dict[str, Any]]) -> list:
+    def _build_contents(messages: List[Dict[str, Any]], current_image_bytes: Optional[bytes] = None) -> list:
         contents = []
-        for msg in messages:
+        for i, msg in enumerate(messages):
             role = msg["role"]
             text = msg["content"]
+            is_last = (i == len(messages) - 1)
 
             if role == "system":
                 contents.append(types.Content(role="user", parts=[types.Part.from_text(text=f"[System] {text}")]))
@@ -476,6 +548,10 @@ class ButlerAgent:
             elif role == "assistant":
                 contents.append(types.Content(role="model", parts=[types.Part.from_text(text=text)]))
             else:  # user
-                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=text)]))
+                parts = [types.Part.from_text(text=text)]
+                # Only attach image to the very last message in the sequence (the current one)
+                if is_last and current_image_bytes:
+                    parts.append(types.Part.from_bytes(data=current_image_bytes, mime_type="image/jpeg"))
+                contents.append(types.Content(role="user", parts=parts))
 
         return contents

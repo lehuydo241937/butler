@@ -78,6 +78,15 @@ class DBManager:
                     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # ── Processed Files tracking ─────────────────────────────────────────
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS processed_files (
+                    filename TEXT PRIMARY KEY,
+                    processed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    source TEXT
+                )
+            """)
+            conn.commit()
 
     # ── Master Catalog Operations ────────────────────────────────────────
 

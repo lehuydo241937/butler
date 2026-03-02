@@ -276,6 +276,28 @@ elif page == "🧬 Vector Collections":
             
             st.write("### Configuration")
             st.json(info.model_dump())
+
+            st.divider()
+            st.write("### 📤 Upload New Data")
+            st.info("Upload a Zalo or Facebook message export (ZIP) to vectorize it into a new collection.")
+            
+            uploaded_file = st.file_uploader("Choose a ZIP file", type="zip")
+            if uploaded_file is not None:
+                if st.button("🚀 Process & Vectorize"):
+                    with st.spinner("Extracting and indexing... this may take a minute"):
+                        # Use BytesIO to handle the uploaded file
+                        from io import BytesIO
+                        zip_data = BytesIO(uploaded_file.read())
+                        result = agent.ingester.process_zip(zip_data, filename=uploaded_file.name)
+                        
+                        if result["status"] == "success":
+                            st.success(result["message"])
+                            st.balloons()
+                            st.rerun()
+                        elif result["status"] == "skipped":
+                            st.warning(result["message"])
+                        else:
+                            st.error(f"❌ Error: {result['message']}")
             
     except Exception as e:
         st.error(f"Error connecting to Qdrant: {e}")
