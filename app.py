@@ -12,7 +12,7 @@ from agent.network_utils import force_ipv4
 force_ipv4()
 
 from agent import ButlerAgent
-from chat_history import RedisChatHistory
+from backend.chat_history import RedisChatHistory
 
 
 # ── Page config ─────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ sys.path.append(os.getcwd())
 sys.stdout.reconfigure(encoding='utf-8')
 from agent.vector_db import VectorDB
 from google import genai
-from secrets_manager.redis_secrets import RedisSecretsManager
+from backend.secrets_manager.redis_secrets import RedisSecretsManager
 
 def test_query():
     secrets = RedisSecretsManager()

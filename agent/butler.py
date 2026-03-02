@@ -6,8 +6,8 @@ from google import genai
 from google.genai import types
 from langfuse import observe
 
-from chat_history import RedisChatHistory
-from secrets_manager.redis_secrets import RedisSecretsManager
+from backend.chat_history import RedisChatHistory
+from backend.secrets_manager.redis_secrets import RedisSecretsManager
 from agent.db_manager import DBManager
 from agent.gmail_tools import GmailTools
 from agent.vector_db import VectorDB
@@ -16,18 +16,14 @@ from agent.data_ingester import DataIngester
 load_dotenv()
 
 # ── Default system prompt ───────────────────────────────────────────────
-DEFAULT_SYSTEM_PROMPT = (
-    "You are Kuro, a helpful and friendly AI assistant. "
-    "You have access to a SQL database via tools. "
-    "Use these tools to store, retrieve, and manage structured data. "
-    "When asked to create a table, DO NOT include 'PRIMARY KEY' in your column definitions, as the system automatically uses a composite (row_id, version) primary key for versioning. "
-    "Row versioning is handled automatically when you use the update tool. "
-    "Always check the database metadata first to understand available tables. "
-    "You also have access to Gmail tools: list_emails, get_email, search_emails, add_label_to_email, remove_label_from_email. "
-    "You can also manage multi-step background Protocols: register_email_digest, create_protocol, list_protocols. "
-    "To handle external chat data (Zalo, Facebook), use sync_data_folder to check for new exports and semantic_search_messages to retrieve them. "
-    "Be concise but thorough."
-)
+def load_system_prompt(file_path="prompts/system_prompt.txt"):
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return "You are a helpful AI assistant."
+
+DEFAULT_SYSTEM_PROMPT = load_system_prompt()
 
 
 class ButlerAgent:

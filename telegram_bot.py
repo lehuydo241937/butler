@@ -13,7 +13,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 from langfuse import observe
 
 from agent.butler import ButlerAgent
-from secrets_manager.redis_secrets import RedisSecretsManager
+from backend.secrets_manager.redis_secrets import RedisSecretsManager
 
 # Enable logging
 logging.basicConfig(

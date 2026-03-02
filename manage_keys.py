@@ -1,7 +1,7 @@
 
 import argparse
 import sys
-from secrets_manager.redis_secrets import RedisSecretsManager
+from backend.secrets_manager.redis_secrets import RedisSecretsManager
 from dotenv import load_dotenv
 
 load_dotenv()

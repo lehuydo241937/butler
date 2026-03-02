@@ -5,7 +5,7 @@ from google import genai
 from dotenv import load_dotenv
 
 sys.path.append(os.getcwd())
-from secrets_manager.redis_secrets import RedisSecretsManager
+from backend.secrets_manager.redis_secrets import RedisSecretsManager
 
 load_dotenv()
 

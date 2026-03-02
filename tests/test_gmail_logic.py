@@ -10,7 +10,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 from agent.vector_db import VectorDB
 from agent.gmail_tools import GmailTools
-from secrets_manager.redis_secrets import RedisSecretsManager
+from backend.secrets_manager.redis_secrets import RedisSecretsManager
 from google import genai
 from qdrant_client.http import models
 

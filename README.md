@@ -23,10 +23,10 @@ Butler can be operated via three interfaces: a **CLI**, a **Streamlit web app**,
          └──────┬────────┬────────┬───────┘
                 │        │        │
     ┌───────────▼──┐ ┌───▼────┐ ┌─▼─────────────┐
-    │RedisChatHistory│ │DBManager│ │   VectorDB    │
-    │(chat_history/) │ │(agent/) │ │(Qdrant 6333)  │
-    │- Session mgmt  │ │- SQLite  │ │- RAG Search    │
-    │- Msg history   │ │- HITL    │ │- Email Index   │
+    │  Backend Layer │ │DBManager│ │   VectorDB    │
+    │  (backend/)    │ │(agent/) │ │(Qdrant 6333)  │
+    │- Chat History  │ │- SQLite  │ │- RAG Search    │
+    │- Redis Secrets │ │- HITL    │ │- Email Index   │
     └────────────────┘ └──────────┘ └───────────────┘
 ```
 
@@ -70,7 +70,7 @@ The agent (Kuro) has access to a wide variety of tools:
 
 ```
 butler/
-├── agent/
+├── agent/                   # Agentic logic & Tool wrappers
 │   ├── butler.py            # Core agent class (Kuro)
 │   ├── db_manager.py        # SQLite backend (versioning, HITL)
 │   ├── vector_db.py         # Qdrant wrapper (semantic search)
@@ -78,12 +78,20 @@ butler/
 │   ├── gmail_tools.py       # Gmail API integration
 │   ├── email_digest.py      # Logic for the Daily Email Digest protocol
 │   └── protocol_runner.py   # Multi-step pipeline executor
-├── chat_history/
-│   └── redis_history.py     # Redis session & history store
+├── backend/                 # Core Infrastructure & Persistence
+│   ├── chat_history/        # Redis session & history store
+│   └── secrets_manager/     # Redis-backed secrets manager
+├── prompts/                 # Externalized AI prompts
+│   └── system_prompt.txt    # Default system instruction
+├── tests/                   # Test suite
+│   └── unit/                # Unit tests for core functions
+├── run_bot.bat              # Run Telegram Bot
+├── run_api.bat              # Run REST API
+├── run_streamlit.bat        # Run Streamlit UI
+├── run_all.bat              # Run all components
 ├── app.py                   # Streamlit web UI
 ├── main.py                  # CLI interface
-├── telegram_bot.py          # Telegram bot with HITL & Background tasks
-├── requirements.txt         # Python dependencies
+├── telegram_bot.py          # Telegram bot script
 └── butler_sql.db            # SQLite database (auto-created)
 ```
 
@@ -119,21 +127,24 @@ python manage_keys.py set-file gmail_credentials path/to/credentials.json
 
 ## Running Butler
 
-### Telegram Bot (Recommended)
+### Telegram Bot
 ```bash
-python telegram_bot.py
+run_bot.bat
 ```
-*Features background persistence, HITL buttons, and message syncing.*
 
 ### Streamlit UI
 ```bash
-streamlit run app.py
+run_streamlit.bat
 ```
-*Features a dual-tab layout: Chat and Database Explorer.*
 
-### CLI
+### REST API
 ```bash
-python main.py
+run_api.bat
+```
+
+### All Components
+```bash
+run_all.bat
 ```
 
 ---
