@@ -170,7 +170,10 @@ class TelegramButler:
                     await context.bot.send_message(chat_id=chat_id, text=f"🔔 *Automated Task: {task['name']}*\n\n{reply}", parse_mode='Markdown')
                 except Exception as e:
                     logging.error(f"Error executing task {task_id}: {e}")
-                    await context.bot.send_message(chat_id=chat_id, text=f"❌ Error executing automated task '{task['name']}': {e}")
+                    try:
+                        await context.bot.send_message(chat_id=chat_id, text=f"❌ Error executing automated task '{task['name']}': {e}")
+                    except Exception as send_error:
+                        logging.error(f"Failed to send error message to chat {chat_id}: {send_error}")
                 
                 # Update run times
                 iter = croniter(cron_expr, now)
@@ -214,10 +217,13 @@ class TelegramButler:
                     logging.info(f"Protocol '{proto['name']}' finished successfully.")
                 except Exception as e:
                     logging.error(f"Error executing protocol {proto_id}: {e}")
-                    await context.bot.send_message(
-                        chat_id=chat_id, 
-                        text=f"❌ Error executing protocol '{proto['name']}': {e}"
-                    )
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat_id, 
+                            text=f"❌ Error executing protocol '{proto_id}': {e}"
+                        )
+                    except Exception as send_error:
+                        logging.error(f"Failed to send error message to chat {chat_id}: {send_error}")
                 
                 # Update run times
                 iter = croniter(cron_expr, now)

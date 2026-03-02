@@ -26,8 +26,7 @@ def list_models():
     print("Available embedding models:")
     try:
         for model in client.models.list():
-            if 'embed' in model.name.lower():
-                print(f"- {model.name}")
+            print(f"- {model.name}")
     except Exception as e:
         print(f"Error listing models: {e}")
 

@@ -25,9 +25,9 @@ def print_sessions(agent: ButlerAgent) -> None:
         print("  (no sessions yet)")
         return
     for s in sessions:
-        marker = " ◀" if s["session_id"] == agent.session_id else ""
+        marker = " <--" if s["session_id"] == agent.session_id else ""
         title = s.get("title", "(untitled)")
-        print(f"  {s['session_id'][:8]}…  {title}{marker}")
+        print(f"  {s['session_id'][:8]}...  {title}{marker}")
 
 
 def choose_or_create_session(agent: ButlerAgent) -> None:

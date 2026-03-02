@@ -81,7 +81,8 @@ class ButlerAgent:
         self.configure_langfuse(self.secrets)
 
         self.client = genai.Client(api_key=api_key)
-        self.model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+        self.model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+        print(f"[Butler] Agent initialised with model: {self.model}")
         self.ingester = DataIngester(self.db, self.vector_db, self.client)
 
         # ── Tool Definitions ────────────────────────────────────────────
@@ -493,19 +494,34 @@ class ButlerAgent:
         contents = self._build_contents(messages_raw, current_image_bytes=image_bytes)
 
         # 4. Call Gemini with Tools
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=self.system_prompt + "\n\nCRITICAL: If you call a proposal tool, you MUST include the exact HITL_PROPOSAL:... string in your final response text so the system can show buttons to the user. If a user approves an action in text, use list_pending_actions to find the ID and confirm_action to execute it.",
-                tools=self.tools,
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                    disable=False,
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=self.system_prompt + "\n\nCRITICAL: If you call a proposal tool, you MUST include the exact HITL_PROPOSAL:... string in your final response text so the system can show buttons to the user. If a user approves an action in text, use list_pending_actions to find the ID and confirm_action to execute it.",
+                    tools=self.tools,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                        disable=False,
+                    ),
                 ),
-            ),
-        )
+            )
+        except Exception as e:
+            print(f"[Butler] Gemini API Error: {e}")
+            raise
 
+        # Debug print
+        print(f"[Butler] Model: {self.model}, Response candidates: {len(response.candidates or [])}")
+        
         reply = response.text or "(no response)"
+        if not response.text and response.candidates:
+            # Check if there's a finish reason that explains it
+            finish_reason = response.candidates[0].finish_reason
+            print(f"[Butler] Warning: Empty text response. Finish reason: {finish_reason}")
+            if finish_reason == "SAFETY":
+                reply = "⚠️ I cannot answer this due to safety filters."
+            elif finish_reason == "OTHER":
+                 reply = "⚠️ Something went wrong with the model generation."
 
         # 5. Persist assistant reply
         self.history.add_message(self.session_id, "assistant", reply)

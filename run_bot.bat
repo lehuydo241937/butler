@@ -9,7 +9,7 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo.
 echo Launching Monitoring Dashboard...
-start https://cloud.langfuse.com
+start https://us.cloud.langfuse.com/project/cmlzfq7lf003oad07fxxd7s9n
 
 echo.
 echo Starting REST API in new window...
