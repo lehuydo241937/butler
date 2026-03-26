@@ -1,7 +1,7 @@
 import base64
 import os
 from typing import Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from agent import ButlerAgent
 from agent.network_utils import force_ipv4
@@ -24,6 +24,12 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     reply: str
+    session_id: str
+
+class AudioResponse(BaseModel):
+    transcription: str
+    reply: str
+    audio_base64: str
     session_id: str
 
 # ── Agent Instance ──────────────────────────────────────────────────────
@@ -84,6 +90,60 @@ async def chat_endpoint(request: ChatRequest):
     except Exception as e:
         # Log error in real application
         raise HTTPException(status_code=500, detail=f"Agent Error: {str(e)}")
+
+@app.post("/audio", response_model=AudioResponse)
+async def audio_endpoint(
+    file: UploadFile = File(...), 
+    session_id: Optional[str] = None,
+    instruction: Optional[str] = None
+):
+    """
+    Audio interaction endpoint.
+    - file: The user's voice input (wav/mp3/etc).
+    - session_id: Optional session ID.
+    - instruction: Optional instruction to prepend/append to the transcription.
+    """
+    agent = get_agent()
+    
+    if session_id:
+        try:
+            agent.switch_session(session_id)
+        except ValueError:
+            agent.session_id = session_id
+
+    try:
+        audio_bytes = await file.read()
+        
+        # 1. Transcribe (includes noise reduction by default)
+        user_text = agent.voice.transcribe(audio_bytes)
+        if user_text.startswith("Error:"):
+             return AudioResponse(transcription="", reply=user_text, audio_base64="", session_id=agent.session_id)
+
+        # 2. Append instruction if provided
+        chat_prompt = user_text
+        if instruction:
+            chat_prompt += instruction
+
+        # 3. Regular Chat
+        assistant_reply = agent.chat(chat_prompt)
+
+        # 4. Synthesize Speech
+        audio_reply = agent.voice.generate_speech(assistant_reply)
+        
+        audio_b64 = ""
+        if audio_reply:
+            audio_b64 = base64.b64encode(audio_reply).decode("utf-8")
+
+        return AudioResponse(
+            transcription=user_text,
+            reply=assistant_reply,
+            audio_base64=audio_b64,
+            session_id=agent.session_id
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Voice Agent Error: {str(e)}")
 
 @app.get("/health")
 async def health_check():

@@ -9,6 +9,7 @@ force_ipv4()
 from datetime import datetime, timezone
 from croniter import croniter
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from langfuse import observe
 
@@ -170,10 +171,14 @@ class TelegramButler:
                     await context.bot.send_message(chat_id=chat_id, text=f"🔔 *Automated Task: {task['name']}*\n\n{reply}", parse_mode='Markdown')
                 except Exception as e:
                     logging.error(f"Error executing task {task_id}: {e}")
-                    try:
-                        await context.bot.send_message(chat_id=chat_id, text=f"❌ Error executing automated task '{task['name']}': {e}")
-                    except Exception as send_error:
-                        logging.error(f"Failed to send error message to chat {chat_id}: {send_error}")
+                    if "Chat not found" in str(e):
+                        logging.warning(f"Pausing task {task_id} due to 'Chat not found'")
+                        db.execute_raw_query("UPDATE tasks SET status = 'paused' WHERE id = ?", (task_id,))
+                    else:
+                        try:
+                            await context.bot.send_message(chat_id=chat_id, text=f"❌ Error executing automated task '{task['name']}': {e}")
+                        except Exception as send_error:
+                            logging.error(f"Failed to send error message to chat {chat_id}: {send_error}")
                 
                 # Update run times
                 iter = croniter(cron_expr, now)
@@ -217,13 +222,17 @@ class TelegramButler:
                     logging.info(f"Protocol '{proto['name']}' finished successfully.")
                 except Exception as e:
                     logging.error(f"Error executing protocol {proto_id}: {e}")
-                    try:
-                        await context.bot.send_message(
-                            chat_id=chat_id, 
-                            text=f"❌ Error executing protocol '{proto_id}': {e}"
-                        )
-                    except Exception as send_error:
-                        logging.error(f"Failed to send error message to chat {chat_id}: {send_error}")
+                    if "Chat not found" in str(e):
+                        logging.warning(f"Pausing protocol {proto_id} due to 'Chat not found'")
+                        db.execute_raw_query("UPDATE protocols SET status = 'paused' WHERE id = ?", (proto_id,))
+                    else:
+                        try:
+                            await context.bot.send_message(
+                                chat_id=chat_id, 
+                                text=f"❌ Error executing protocol '{proto_id}': {e}"
+                            )
+                        except Exception as send_error:
+                            logging.error(f"Failed to send error message to chat {chat_id}: {send_error}")
                 
                 # Update run times
                 iter = croniter(cron_expr, now)

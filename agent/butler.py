@@ -80,6 +80,9 @@ class ButlerAgent:
         self.model = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
         print(f"[Butler] Agent initialised with model: {self.model}")
         self.ingester = DataIngester(self.db, self.vector_db, self.client)
+        
+        from agent.voice_handler import VoiceHandler
+        self.voice = VoiceHandler()
 
         # ── Tool Definitions ────────────────────────────────────────────
         self.tools = [
@@ -523,6 +526,29 @@ class ButlerAgent:
         self.history.add_message(self.session_id, "assistant", reply)
 
         return reply
+
+    @observe()
+    def voice_chat(self, audio_bytes: bytes) -> Dict[str, Any]:
+        """
+        Process audio input: transcribe, chat, and synthesize reply.
+        Returns a dict with transcription, reply text, and audio response bytes.
+        """
+        # 1. Transcribe (includes noise reduction by default)
+        user_text = self.voice.transcribe(audio_bytes)
+        if user_text.startswith("Error:"):
+             return {"transcription": "", "reply": user_text, "audio": b""}
+
+        # 2. Regular Chat
+        assistant_reply = self.chat(user_text)
+
+        # 3. Synthesize Speech
+        audio_reply = self.voice.generate_speech(assistant_reply)
+
+        return {
+            "transcription": user_text,
+            "reply": assistant_reply,
+            "audio": audio_reply
+        }
 
     # ── Session helpers ─────────────────────────────────────────────────
     def new_session(self, title: Optional[str] = None) -> str:

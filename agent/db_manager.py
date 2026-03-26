@@ -86,6 +86,61 @@ class DBManager:
                     source TEXT
                 )
             """)
+            # ── script_inventory: verified, callable Python scripts ────────
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS script_inventory (
+                    id          TEXT PRIMARY KEY,          -- uuid
+                    name        TEXT UNIQUE NOT NULL,
+                    description TEXT,
+                    file_path   TEXT NOT NULL,
+                    input_schema TEXT DEFAULT '{}',        -- JSON: {arg: type}
+                    is_active   INTEGER DEFAULT 1,         -- 1=active, 0=disabled
+                    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # ── plans: high-level task decompositions proposed by Kuro ────
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS plans (
+                    plan_id         TEXT PRIMARY KEY,      -- uuid
+                    goal            TEXT NOT NULL,
+                    status          TEXT DEFAULT 'pending', -- pending|running|done|failed
+                    assigned_model  TEXT,
+                    output_summary  TEXT,
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # ── plan_steps: individual steps within a plan ─────────────────
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS plan_steps (
+                    id              TEXT PRIMARY KEY,      -- uuid
+                    plan_id         TEXT NOT NULL,
+                    step_index      INTEGER NOT NULL,
+                    description     TEXT NOT NULL,
+                    assigned_layer  TEXT,                  -- script_run|agent_dev|llm_call
+                    assigned_model  TEXT,
+                    script_id       TEXT,                  -- FK → script_inventory.id (nullable)
+                    status          TEXT DEFAULT 'pending', -- pending|running|done|failed
+                    output_summary  TEXT,
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (plan_id) REFERENCES plans(plan_id)
+                )
+            """)
+            # ── dev_logs: history of AI self-correction / agent_dev runs ──
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS dev_logs (
+                    id              TEXT PRIMARY KEY,      -- uuid
+                    plan_step_id    TEXT,                  -- FK → plan_steps.id
+                    branch_name     TEXT,
+                    iteration       INTEGER DEFAULT 1,
+                    code_written    TEXT,
+                    test_output     TEXT,
+                    error_summary   TEXT,
+                    status          TEXT DEFAULT 'in_progress', -- in_progress|success|failed
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             conn.commit()
 
     # ── Master Catalog Operations ────────────────────────────────────────
@@ -372,5 +427,135 @@ class DBManager:
         with self._get_conn() as conn:
             cursor = conn.execute(
                 "SELECT id, name, description, cron_expression, status, last_run, next_run FROM protocols"
+            )
+            return [dict(r) for r in cursor.fetchall()]
+
+    # ── Script Inventory Operations ─────────────────────────────────────────
+
+    def register_script(self, name: str, description: str, file_path: str, input_schema: dict = None) -> str:
+        """Adds or upserts a script into the inventory. Returns its id."""
+        script_id = str(uuid.uuid4())
+        schema_json = json.dumps(input_schema or {})
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO script_inventory (id, name, description, file_path, input_schema)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    description=excluded.description,
+                    file_path=excluded.file_path,
+                    input_schema=excluded.input_schema,
+                    updated_at=CURRENT_TIMESTAMP
+            """, (script_id, name, description, file_path, schema_json))
+        return script_id
+
+    def get_active_scripts(self) -> List[Dict[str, Any]]:
+        """Returns all active scripts in the inventory."""
+        with self._get_conn() as conn:
+            cursor = conn.execute("SELECT * FROM script_inventory WHERE is_active = 1")
+            rows = [dict(r) for r in cursor.fetchall()]
+        for r in rows:
+            r["input_schema"] = json.loads(r["input_schema"])
+        return rows
+
+    def find_script_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        """Looks up a script by exact name."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM script_inventory WHERE name = ? AND is_active = 1", (name,)
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["input_schema"] = json.loads(result["input_schema"])
+        return result
+
+    # ── Plan Operations ─────────────────────────────────────────────────────
+
+    def create_plan(self, goal: str, assigned_model: str = None) -> str:
+        """Creates a new plan record and returns its plan_id."""
+        plan_id = str(uuid.uuid4())
+        with self._get_conn() as conn:
+            conn.execute(
+                "INSERT INTO plans (plan_id, goal, assigned_model) VALUES (?, ?, ?)",
+                (plan_id, goal, assigned_model)
+            )
+        return plan_id
+
+    def add_plan_step(self, plan_id: str, step_index: int, description: str,
+                      assigned_layer: str = None, assigned_model: str = None,
+                      script_id: str = None) -> str:
+        """Appends a step to a plan. Returns step id."""
+        step_id = str(uuid.uuid4())
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO plan_steps
+                    (id, plan_id, step_index, description, assigned_layer, assigned_model, script_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (step_id, plan_id, step_index, description, assigned_layer, assigned_model, script_id))
+        return step_id
+
+    def update_plan_status(self, plan_id: str, status: str, output_summary: str = None):
+        """Updates the status (and optionally output) of a plan."""
+        with self._get_conn() as conn:
+            conn.execute("""
+                UPDATE plans SET status=?, output_summary=?, updated_at=CURRENT_TIMESTAMP
+                WHERE plan_id=?
+            """, (status, output_summary, plan_id))
+
+    def update_plan_step_status(self, step_id: str, status: str, output_summary: str = None):
+        """Updates the status of a single plan step."""
+        with self._get_conn() as conn:
+            conn.execute("""
+                UPDATE plan_steps SET status=?, output_summary=? WHERE id=?
+            """, (status, output_summary, step_id))
+
+    def get_plan_with_steps(self, plan_id: str) -> Optional[Dict[str, Any]]:
+        """Returns a plan and its ordered steps."""
+        with self._get_conn() as conn:
+            plan_row = conn.execute("SELECT * FROM plans WHERE plan_id=?", (plan_id,)).fetchone()
+            if not plan_row:
+                return None
+            plan = dict(plan_row)
+            steps_cursor = conn.execute(
+                "SELECT * FROM plan_steps WHERE plan_id=? ORDER BY step_index", (plan_id,)
+            )
+            plan["steps"] = [dict(s) for s in steps_cursor.fetchall()]
+        return plan
+
+    def list_plans(self, status: str = None) -> List[Dict[str, Any]]:
+        """Lists plans, optionally filtered by status."""
+        with self._get_conn() as conn:
+            if status:
+                cursor = conn.execute(
+                    "SELECT plan_id, goal, status, assigned_model, created_at FROM plans WHERE status=? ORDER BY created_at DESC",
+                    (status,)
+                )
+            else:
+                cursor = conn.execute(
+                    "SELECT plan_id, goal, status, assigned_model, created_at FROM plans ORDER BY created_at DESC"
+                )
+            return [dict(r) for r in cursor.fetchall()]
+
+    # ── Dev Log Operations ──────────────────────────────────────────────────
+
+    def log_dev_iteration(self, plan_step_id: str, branch_name: str, iteration: int,
+                          code_written: str, test_output: str, error_summary: str,
+                          status: str = "in_progress") -> str:
+        """Logs one iteration of the agent_dev self-correction loop."""
+        log_id = str(uuid.uuid4())
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO dev_logs
+                    (id, plan_step_id, branch_name, iteration, code_written, test_output, error_summary, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (log_id, plan_step_id, branch_name, iteration, code_written, test_output, error_summary, status))
+        return log_id
+
+    def get_dev_logs(self, plan_step_id: str) -> List[Dict[str, Any]]:
+        """Returns all dev log entries for a given plan step, in order."""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM dev_logs WHERE plan_step_id=? ORDER BY iteration",
+                (plan_step_id,)
             )
             return [dict(r) for r in cursor.fetchall()]

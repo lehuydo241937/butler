@@ -11,3 +11,11 @@ __pycache__
 token.json
 credentials.json
 client_secret_*.json
+
+# Large local AI model binaries — use Git LFS or download separately
+localai_models/*.onnx
+localai_models/*.bin
+localai_models/*.tar.gz
+
+# SQLite database — runtime artifact, not source
+butler_sql.db

@@ -13,6 +13,8 @@ force_ipv4()
 
 from agent import ButlerAgent
 from backend.chat_history import RedisChatHistory
+from streamlit_mic_recorder import mic_recorder
+import base64
 
 
 # ── Page config ─────────────────────────────────────────────────────────
@@ -66,6 +68,12 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+def autorecord_callback():
+    """Callback for mic_recorder to handle post-recording logic."""
+    if "audio_buffer" in st.session_state and st.session_state.audio_buffer:
+        st.session_state.process_audio = True
 
 
 # ── Helper: initialise agent once per Streamlit session ─────────────────
@@ -138,25 +146,120 @@ if page == "💬 Agent Testing":
 
     st.markdown(f'<div class="session-pill">Test Session ID: `{TEST_SESSION_ID}`</div>', unsafe_allow_html=True)
 
-    # Display chat messages
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    # ── Voice Conversation Mode ──────────────────────────────────────────
+    st.divider()
+    
+    col_chat, col_controls = st.columns([2, 1])
 
-    # Chat input
-    if prompt := st.chat_input("Ask Butler anything…"):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    with col_controls:
+        st.subheader("🎙️ Voice Settings")
+        voice_enabled = st.toggle("Conversation Mode", value=False)
+        
+        if voice_enabled:
+            st.info("Kuro is ready! Click once to begin listening.")
+            
+            # Record Audio Control
+            audio = mic_recorder(
+                start_prompt="🎙️ Start Listening",
+                stop_prompt="⏹️ Stop & Process",
+                key="recorder"
+            )
 
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking…"):
-                try:
-                    reply = agent.chat(prompt)
-                except Exception as e:
-                    reply = f"⚠️ Error: {e}"
-            st.markdown(reply)
-        st.session_state.messages.append({"role": "assistant", "content": reply})
+            # Audio Player and Stop Button
+            if st.session_state.get("current_audio_b64"):
+                st.write("---")
+                if st.button("🔴 Stop Kuro", use_container_width=True):
+                    st.session_state.current_audio_b64 = None
+                    st.rerun()
+                
+                audio_html = f'<audio autoplay="true" src="data:audio/wav;base64,{st.session_state.current_audio_b64}"></audio>'
+                st.markdown(audio_html, unsafe_allow_html=True)
+                # Clear the audio buffer immediately after rendering to prevent looping on next rerun
+                st.session_state.current_audio_b64 = None
+        else:
+            audio = None
+
+    with col_chat:
+        st.subheader("💬 Chat")
+        # Display chat messages
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        if voice_enabled and audio:
+            # Handle interruption: clear current audio and process new
+            st.session_state.current_audio_b64 = None
+            
+            with st.chat_message("user"):
+                st.markdown("*(Audio Input)*")
+            
+            with st.chat_message("assistant"):
+                with st.spinner("Kuro is processing your voice via API..."):
+                    try:
+                        import requests
+                        # Instruction for plain text in voice mode
+                        voice_instruction = "\n\n(IMPORTANT: Response in plain text only, no markdown, no special characters, for natural speech)."
+                        res = requests.post(
+                            "http://localhost:8000/audio",
+                            files={"file": ("audio.webm", audio["bytes"], "audio/webm")},
+                            data={
+                                "session_id": agent.session_id,
+                                "instruction": voice_instruction
+                            }
+                        )
+                        if res.status_code != 200:
+                            raise Exception(f"API Error {res.status_code}: {res.text}")
+                        
+                        api_data = res.json()
+                        result = {
+                            "transcription": api_data.get("transcription", ""),
+                            "reply": api_data.get("reply", ""),
+                            "audio": base64.b64decode(api_data["audio_base64"]) if api_data.get("audio_base64") else None
+                        }
+                        
+                        # Only append successful transcriptions
+                        if result['transcription'] and not result['transcription'].startswith("Error:"):
+                            st.session_state.messages.append({"role": "user", "content": f"🎙️ {result['transcription']}"})
+                            st.markdown(f"**Transcription:** {result['transcription']}")
+                        else:
+                            st.session_state.messages.append({"role": "user", "content": f"🎙️ (Inaudible/Error)"})
+                            st.markdown("**Transcription:** *(Inaudible/Error)*")
+
+                        st.markdown(result['reply'])
+                        st.session_state.messages.append({"role": "assistant", "content": result['reply']})
+                        
+                        if result['audio']:
+                            st.session_state.current_audio_b64 = base64.b64encode(result['audio']).decode()
+                            st.rerun()
+                            
+                    except Exception as e:
+                        st.error(f"Voice Error: {e}")
+
+        # Chat input text box (always available)
+        if prompt := st.chat_input("Ask Butler anything…"):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking…"):
+                    try:
+                        final_prompt = prompt
+                        if voice_enabled:
+                            final_prompt += "\n\n(IMPORTANT: Response in plain text only, no markdown, no special characters, for natural speech)."
+                        reply = agent.chat(final_prompt)
+                    except Exception as e:
+                        reply = f"⚠️ Error: {e}"
+                st.markdown(reply)
+            st.session_state.messages.append({"role": "assistant", "content": reply})
+
+            # If voice is enabled, also generate audio for the text query
+            if voice_enabled:
+                with st.spinner("Generating audio..."):
+                    audio_bytes = agent.voice.generate_speech(reply)
+                    if audio_bytes:
+                        st.session_state.current_audio_b64 = base64.b64encode(audio_bytes).decode()
+                        st.rerun()
 
 # ── PAGE: SQL Schema View ──────────────────────────────────────────────
 elif page == "🗃️ SQL Schema View":
